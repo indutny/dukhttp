@@ -20,15 +20,20 @@ cd -
 ## Benchmarks
 
 ```sh
-% wrk -c 100 -t 8 -d 300 http://127.0.0.1:6007/
-Running 5m test @ http://127.0.0.1:6007/
+% wrk --latency -c 100 -t 8 -d 60 http://127.0.0.1:6007/
+Running 1m test @ http://127.0.0.1:6007/
   8 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   595.97us  384.36us  38.82ms   96.87%
-    Req/Sec    20.34k     1.37k   22.42k    84.25%
-  26312193 requests in 2.71m, 1.69GB read
-Requests/sec: 161918.10
-Transfer/sec:     10.65MB
+    Latency   513.90us  482.86us  36.40ms   99.21%
+    Req/Sec    23.65k     1.26k   25.71k    80.37%
+  Latency Distribution
+     50%  491.00us
+     75%  514.00us
+     90%  541.00us
+     99%    0.98ms
+  11312516 requests in 1.00m, 668.88MB read
+Requests/sec: 188223.65
+Transfer/sec:     11.13MB
 ```
 
 Peak memory usage: 12MB.
