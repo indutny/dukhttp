@@ -31,6 +31,8 @@ Requests/sec: 161918.10
 Transfer/sec:     10.65MB
 ```
 
+Peak memory usage: 12MB.
+
 #### LICENSE
 
 This software is licensed under the MIT License.
