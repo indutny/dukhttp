@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <signal.h>
 
 #include "uv.h"
 #include "duktape.h"
@@ -36,6 +37,7 @@ struct conn_s {
   uv_tcp_t tcp_client;
   char read_buf[1024];
   char* url;
+  size_t url_len;
 
   llhttp_t http;
 
@@ -94,17 +96,28 @@ static void conn_read_cb(uv_stream_t* stream, ssize_t nread,
     fprintf(stderr, "parsing error: %s at pos: %d\n",
         llhttp_get_error_reason(&conn->http),
         (int) (llhttp_get_error_pos(&conn->http) - buf->base));
+
     uv_close((uv_handle_t*) stream, conn_on_close);
+    return;
   }
 }
 
 static void conn_write_cb(uv_write_t* req, int status) {
-  CHECK_EQ(0, status);
-
-  free(req->data);
+  conn_t* conn = req->data;
   req->data = NULL;
 
   free(req);
+
+  /* Error */
+  if (status != 0) {
+    /* TODO(indutny): I forgot if we should ignore this. I think we should? */
+    if (status == UV_EPIPE) {
+      return;
+    }
+
+    uv_close((uv_handle_t*) &conn->tcp_client, conn_on_close);
+    return;
+  }
 }
 
 static void on_connection(uv_stream_t* server, int status) {
@@ -147,17 +160,34 @@ static int conn_on_message_begin(llhttp_t* http) {
   return HPE_OK;
 }
 
+static void append_to_buffer(char** buffer,
+                             size_t* buffer_len,
+                             const char* data,
+                             size_t len) {
+  char* new_buffer = realloc(*buffer, *buffer_len + len);
+  CHECK(new_buffer != NULL);
+
+  memcpy(new_buffer + *buffer_len, data, len);
+  *buffer = new_buffer;
+  *buffer_len += len;
+}
+
 static int conn_on_url(llhttp_t* http, const char* p, size_t len) {
   conn_t* conn = http->data;
 
-  if (conn->url == NULL) {
-    conn->url = strndup(p, len);
-  } else {
-    char* concat = strncat(conn->url, p, len);
-    free(conn->url);
-    conn->url = concat;
-  }
-  CHECK(conn->url != NULL);
+  append_to_buffer(&conn->url, &conn->url_len, p, len);
+
+  return HPE_OK;
+}
+
+static int conn_on_header_field(llhttp_t* http, const char* p, size_t len) {
+  conn_t* conn = http->data;
+
+  return HPE_OK;
+}
+
+static int conn_on_header_value(llhttp_t* http, const char* p, size_t len) {
+  conn_t* conn = http->data;
 
   return HPE_OK;
 }
@@ -171,7 +201,7 @@ static int conn_on_message_complete(llhttp_t* http) {
   /* Duplicate function which should be on the stack */
   duk_dup(ctx, -1);
 
-  duk_push_string(ctx, conn->url);
+  duk_push_lstring(ctx, conn->url, conn->url_len);
   duk_push_string(ctx, llhttp_method_name(http->method));
 
   duk_call(ctx, 2);
@@ -207,8 +237,11 @@ static int conn_on_message_complete(llhttp_t* http) {
       code,
       (long long) body_len);
 
-  char* response = malloc(response_len + body_len + 1);
-  CHECK(response != NULL);
+  uv_write_t* req;
+  req = malloc(sizeof(*req) + response_len + body_len + 1);
+  CHECK(req != NULL);
+
+  char* response = ((char*) req) + sizeof(*req);
 
   CHECK_EQ(response_len, snprintf(response, response_len + 1,
       "HTTP/1.1 %d HTTP/1.1 WHATEVER\r\n"
@@ -219,12 +252,7 @@ static int conn_on_message_complete(llhttp_t* http) {
 
   memcpy(response + response_len, body, body_len);
 
-  uv_write_t* req;
-
-  req = malloc(sizeof(*req));
-  CHECK(req != NULL);
-
-  req->data = response;
+  req->data = conn;
 
   uv_buf_t bufs[1] = { uv_buf_init(response, response_len + body_len) };
 
@@ -238,6 +266,7 @@ static int conn_on_message_complete(llhttp_t* http) {
   /* Finally free request url */
   free(conn->url);
   conn->url = NULL;
+  conn->url_len = 0;
 
   return HPE_OK;
 }
@@ -311,6 +340,8 @@ int main(int argc, char** argv) {
   http_settings.on_message_begin = conn_on_message_begin;
   http_settings.on_url = conn_on_url;
   http_settings.on_message_complete = conn_on_message_complete;
+  http_settings.on_header_field = conn_on_header_field;
+  http_settings.on_header_value = conn_on_header_value;
 
   CHECK_EQ(0, uv_loop_init(&loop));
 
@@ -323,6 +354,14 @@ int main(int argc, char** argv) {
   CHECK_EQ(0, uv_listen((uv_stream_t*) &tcp_server, BACKLOG, on_connection));
 
   fprintf(stderr, "Listening on http://[::]:6007\r\n");
+
+  /* Ignore SIGPIPE */
+  {
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &act, NULL);
+  }
 
   CHECK_EQ(0, uv_run(&loop, UV_RUN_DEFAULT));
 
