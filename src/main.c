@@ -45,6 +45,7 @@ struct conn_s {
 /* Some static vars */
 
 static const int BACKLOG = 511;
+static const int FILE_READ_CHUNK_LEN = 4096;
 
 static uv_loop_t loop;
 static uv_tcp_t tcp_server;
@@ -201,24 +202,22 @@ static int conn_on_message_complete(llhttp_t* http) {
 
   int response_len = snprintf(NULL, 0,
       "HTTP/1.1 %d HTTP/1.1 WHATEVER\r\n"
-      "Content-Length: %d\r\n"
-      "\r\n"
-      "%.*s",
+      "Content-Length: %lld\r\n"
+      "\r\n",
       code,
-      (int) body_len,
-      (int) body_len, body);
+      (long long) body_len);
 
-  char* response = malloc(response_len + 1);
+  char* response = malloc(response_len + body_len + 1);
   CHECK(response != NULL);
 
   CHECK_EQ(response_len, snprintf(response, response_len + 1,
       "HTTP/1.1 %d HTTP/1.1 WHATEVER\r\n"
-      "Content-Length: %d\r\n"
-      "\r\n"
-      "%.*s",
+      "Content-Length: %lld\r\n"
+      "\r\n",
       code,
-      (int) body_len,
-      (int) body_len, body));
+      (long long) body_len));
+
+  memcpy(response + response_len, body, body_len);
 
   uv_write_t* req;
 
@@ -227,7 +226,7 @@ static int conn_on_message_complete(llhttp_t* http) {
 
   req->data = response;
 
-  uv_buf_t bufs[1] = { uv_buf_init(response, response_len) };
+  uv_buf_t bufs[1] = { uv_buf_init(response, response_len + body_len) };
 
   CHECK_EQ(0, uv_write(
         req,
@@ -236,19 +235,52 @@ static int conn_on_message_complete(llhttp_t* http) {
         1,
         conn_write_cb));
 
+  /* Finally free request url */
+  free(conn->url);
+  conn->url = NULL;
+
   return HPE_OK;
 }
 
-bytecode_t compile_bytecode() {
+bytecode_t compile_bytecode(const char* filename) {
   duk_context* ctx;
 
+  /* Read file */
+  FILE* f = fopen(filename, "r");
+  CHECK(f != NULL);
+
+  int max_code_len = FILE_READ_CHUNK_LEN;
+  char* code = malloc(max_code_len);
+  CHECK(code != NULL);
+
+  int code_len = 0;
+
+  for (;;) {
+    int chunk = fread(code + code_len, 1, max_code_len - code_len, f);
+    if (chunk == 0) {
+      CHECK_EQ(1, feof(f));
+      break;
+    }
+
+    code_len += chunk;
+    if (code_len == max_code_len) {
+      max_code_len += FILE_READ_CHUNK_LEN;
+      char* new_code = realloc(code, max_code_len);
+      CHECK(new_code != NULL);
+      code = new_code;
+    }
+  }
+
+  fclose(f);
+
+  /* Compile bytecode */
   ctx = duk_create_heap_default();
 
-  duk_eval_string(ctx,
-      "(function handler(method, url) {\n"
-      "  return { code: 200, body: 'method: ' + method + ' url: ' + url };\n"
-      "})");
+  duk_eval_lstring(ctx, code, code_len);
   duk_dump_function(ctx);
+
+  free(code);
+  code = NULL;
 
   bytecode_t res;
   void* buffer = duk_require_buffer(ctx, -1, &res.size);
@@ -264,8 +296,15 @@ bytecode_t compile_bytecode() {
   return res;
 }
 
-int main() {
-  bytecode = compile_bytecode();
+int main(int argc, char** argv) {
+  if (argc < 2) {
+    fprintf(stderr,
+      "Usage:\n"
+      "./dukhttp handler.js\r\n");
+    return 1;
+  }
+
+  bytecode = compile_bytecode(argv[1]);
 
   llhttp_settings_init(&http_settings);
 
@@ -282,6 +321,8 @@ int main() {
 
   CHECK_EQ(0, uv_tcp_bind(&tcp_server, (const struct sockaddr*) &addr, 0));
   CHECK_EQ(0, uv_listen((uv_stream_t*) &tcp_server, BACKLOG, on_connection));
+
+  fprintf(stderr, "Listening on http://[::]:6007\r\n");
 
   CHECK_EQ(0, uv_run(&loop, UV_RUN_DEFAULT));
 
