@@ -13,8 +13,22 @@ cd -
 
 ## Run instructions
 
-```
+```sh
 ./build/dukhttp ./examples/handler.js
+```
+
+## Benchmarks
+
+```sh
+% wrk -c 100 -t 8 -d 300 http://127.0.0.1:6007/
+Running 5m test @ http://127.0.0.1:6007/
+  8 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   595.97us  384.36us  38.82ms   96.87%
+    Req/Sec    20.34k     1.37k   22.42k    84.25%
+  26312193 requests in 2.71m, 1.69GB read
+Requests/sec: 161918.10
+Transfer/sec:     10.65MB
 ```
 
 #### LICENSE
