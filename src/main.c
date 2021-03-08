@@ -36,12 +36,15 @@ typedef struct conn_s conn_t;
 struct conn_s {
   uv_tcp_t tcp_client;
   char read_buf[1024];
-  char* url;
-  size_t url_len;
+
+  uv_buf_t url;
+  uv_buf_t header_field;
+  uv_buf_t header_value;
 
   llhttp_t http;
 
   duk_context* duk_ctx;
+  duk_idx_t headers_obj;
 };
 
 /* Some static vars */
@@ -61,10 +64,12 @@ static void conn_on_close(uv_handle_t* handle) {
 
   handle->data = NULL;
 
-  if (conn->url != NULL) {
-    free(conn->url);
-    conn->url = NULL;
-  }
+  free(conn->url.base);
+  conn->url = uv_buf_init(NULL, 0);
+  free(conn->header_field.base);
+  conn->header_field = uv_buf_init(NULL, 0);
+  free(conn->header_value.base);
+  conn->header_value = uv_buf_init(NULL, 0);
 
   if (conn->duk_ctx != NULL) {
     duk_destroy_heap(conn->duk_ctx);
@@ -72,6 +77,14 @@ static void conn_on_close(uv_handle_t* handle) {
   }
 
   free(conn);
+}
+
+static void conn_on_fatal_error(void* udata, const char* message) {
+  conn_t* conn = udata;
+
+  fprintf(stderr, "Runtime error: %s\n", message);
+
+  uv_close((uv_handle_t*) &conn->tcp_client, conn_on_close);
 }
 
 static void conn_alloc_cb(uv_handle_t* handle, size_t size, uv_buf_t* buf) {
@@ -141,7 +154,7 @@ static void on_connection(uv_stream_t* server, int status) {
   conn->http.data = conn;
 
   /* Initialize duktape */
-  conn->duk_ctx = duk_create_heap_default();
+  conn->duk_ctx = duk_create_heap(NULL, NULL, NULL, conn, conn_on_fatal_error);
   CHECK(conn->duk_ctx != NULL);
 
   duk_push_external_buffer(conn->duk_ctx);
@@ -156,38 +169,69 @@ static void on_connection(uv_stream_t* server, int status) {
 }
 
 static int conn_on_message_begin(llhttp_t* http) {
-  (void) http;
+  conn_t* conn = http->data;
+
+  /* Duplicate function which should be on the stack */
+  duk_dup(conn->duk_ctx, -1);
+
+  /* Create headers object */
+  conn->headers_obj = duk_push_object(conn->duk_ctx);
+
   return HPE_OK;
 }
 
-static void append_to_buffer(char** buffer,
-                             size_t* buffer_len,
+static void append_to_buffer(uv_buf_t* buf,
                              const char* data,
                              size_t len) {
-  char* new_buffer = realloc(*buffer, *buffer_len + len);
+  char* new_buffer = realloc(buf->base, buf->len + len);
   CHECK(new_buffer != NULL);
 
-  memcpy(new_buffer + *buffer_len, data, len);
-  *buffer = new_buffer;
-  *buffer_len += len;
+  memcpy(new_buffer + buf->len, data, len);
+  buf->base = new_buffer;
+  buf->len += len;
 }
 
 static int conn_on_url(llhttp_t* http, const char* p, size_t len) {
   conn_t* conn = http->data;
 
-  append_to_buffer(&conn->url, &conn->url_len, p, len);
+  append_to_buffer(&conn->url, p, len);
 
   return HPE_OK;
 }
 
+static void conn_add_headers(conn_t* conn) {
+  if (conn->header_value.base == NULL) {
+    return;
+  }
+
+  CHECK(conn->header_field.base != NULL);
+
+  duk_push_lstring(conn->duk_ctx,
+      conn->header_value.base, conn->header_value.len);
+  duk_put_prop_lstring(conn->duk_ctx,
+      conn->headers_obj,
+      conn->header_field.base, conn->header_field.len);
+
+  free(conn->header_field.base);
+  free(conn->header_value.base);
+  conn->header_field = uv_buf_init(NULL, 0);
+  conn->header_value = uv_buf_init(NULL, 0);
+}
+
 static int conn_on_header_field(llhttp_t* http, const char* p, size_t len) {
   conn_t* conn = http->data;
+
+  conn_add_headers(conn);
+
+  append_to_buffer(&conn->header_field, p, len);
 
   return HPE_OK;
 }
 
 static int conn_on_header_value(llhttp_t* http, const char* p, size_t len) {
   conn_t* conn = http->data;
+
+  append_to_buffer(&conn->header_value, p, len);
 
   return HPE_OK;
 }
@@ -196,15 +240,14 @@ static int conn_on_message_complete(llhttp_t* http) {
   conn_t* conn = http->data;
   duk_context* ctx = conn->duk_ctx;
 
-  CHECK(conn->url != NULL);
+  CHECK(conn->url.base != NULL);
 
-  /* Duplicate function which should be on the stack */
-  duk_dup(ctx, -1);
+  conn_add_headers(conn);
 
-  duk_push_lstring(ctx, conn->url, conn->url_len);
+  duk_push_lstring(ctx, conn->url.base, conn->url.len);
   duk_push_string(ctx, llhttp_method_name(http->method));
 
-  duk_call(ctx, 2);
+  duk_call(ctx, 3);
 
   /* The result of execution must be an object */
   duk_require_object(ctx, -1);
@@ -264,11 +307,16 @@ static int conn_on_message_complete(llhttp_t* http) {
         conn_write_cb));
 
   /* Finally free request url */
-  free(conn->url);
-  conn->url = NULL;
-  conn->url_len = 0;
+  free(conn->url.base);
+  conn->url = uv_buf_init(NULL, 0);
 
   return HPE_OK;
+}
+
+static void bytecode_on_fatal_error(void* udata, const char* message) {
+  (void) udata;
+
+  fprintf(stderr, "Compilation error: %s\n", message);
 }
 
 bytecode_t compile_bytecode(const char* filename) {
@@ -303,7 +351,7 @@ bytecode_t compile_bytecode(const char* filename) {
   fclose(f);
 
   /* Compile bytecode */
-  ctx = duk_create_heap_default();
+  ctx = duk_create_heap(NULL, NULL, NULL, NULL, bytecode_on_fatal_error);
 
   duk_eval_lstring(ctx, code, code_len);
   duk_dump_function(ctx);
