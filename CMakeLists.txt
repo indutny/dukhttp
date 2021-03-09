@@ -13,5 +13,5 @@ add_executable(dukhttp src/main.c)
 
 add_dependencies(dukhttp uv_a duktape llhttp)
 
-target_link_libraries(dukhttp uv_a duktape llhttp)
+target_link_libraries(dukhttp uv_a duktape llhttp m)
 target_include_directories(dukhttp PUBLIC "${PROJECT_SOURCE_DIR}/src")
