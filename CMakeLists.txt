@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.4)
 project(dukhttp LANGUAGES C)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -Os -Wall -Wextra")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
+if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -Os -Wall -Wextra")
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -flto")
+endif()
 
 # Include deps
 add_subdirectory("deps/libuv" EXCLUDE_FROM_ALL)
