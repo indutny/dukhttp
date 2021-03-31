@@ -15,5 +15,11 @@ add_executable(dukhttp src/main.c)
 
 add_dependencies(dukhttp uv_a duktape llhttp)
 
-target_link_libraries(dukhttp uv_a duktape llhttp m)
+if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+  target_link_libraries(dukhttp uv_a duktape llhttp m)
+else()
+  target_link_libraries(dukhttp uv_a duktape llhttp)
+endif()
+
+target_link_libraries(dukhttp uv_a duktape llhttp)
 target_include_directories(dukhttp PUBLIC "${PROJECT_SOURCE_DIR}/src")

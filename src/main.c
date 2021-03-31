@@ -403,6 +403,7 @@ int main(int argc, char** argv) {
 
   fprintf(stderr, "Listening on http://[::]:6007\r\n");
 
+#ifndef _WIN32
   /* Ignore SIGPIPE */
   {
     struct sigaction act;
@@ -410,6 +411,7 @@ int main(int argc, char** argv) {
     act.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &act, NULL);
   }
+#endif
 
   CHECK_EQ(0, uv_run(&loop, UV_RUN_DEFAULT));
 
